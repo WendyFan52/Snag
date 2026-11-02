@@ -1,29 +1,29 @@
 """
-Temperature Scaling 置信度校准 — calibrate.py
+Confidence calibration with temperature scaling - calibrate.py
 =================================================================
-在训练完成后运行一次，学习温度参数 T 使模型输出概率校准。
+Run once after training to learn a temperature T that calibrates output probabilities.
 
-原理：
-  uncalibrated: softmax(logits)     → 概率系统性偏高（模型过于自信）
-  calibrated:   softmax(logits / T) → 概率更接近真实频率
+Principle:
+  uncalibrated: softmax(logits)     -> systematically high probabilities (overconfidence)
+  calibrated:   softmax(logits / T) -> probabilities closer to observed frequencies
 
-  T > 1: 使概率分布更平缓（降低过度自信）
-  T < 1: 使概率分布更尖锐（通常不需要）
-  T = 1: 无变化
+  T > 1: flatten the probability distribution (reduce overconfidence)
+  T < 1: sharpen the probability distribution (usually unnecessary)
+  T = 1: no change
 
-优化目标：最小化验证集上的负对数似然（NLL）
+Objective: minimize negative log-likelihood (NLL) on the validation set.
   T* = argmin -sum[ y_i * log(softmax(logits_i / T)) ]
 
-评估指标：Expected Calibration Error (ECE)
-  将预测概率分成10个区间，计算每个区间内"平均置信度"vs"实际准确率"的差
+Evaluation metric: Expected Calibration Error (ECE).
+  Bin predicted probabilities into 10 intervals and compare mean confidence with accuracy.
 
-用法：
+Usage:
   python calibrate.py --model segformer
   python calibrate.py --model all
 
-输出：
+Output:
   checkpoints_{band}/temperature_{model}.json
-  → inference.py 自动读取并应用
+  -> inference.py loads and applies the result automatically.
 
 =================================================================
 """
@@ -51,11 +51,11 @@ ALL_MODELS = list(config.DEEP_MODELS)
 def compute_ece(probs: np.ndarray, labels: np.ndarray,
                 n_bins: int = 10) -> float:
     """
-    probs:  (N,) — 最高类别的预测概率（置信度）
-    labels: (N,) — 是否预测正确（0 or 1）
+    probs:  (N,) - predicted probability of the top class (confidence)
+    labels: (N,) - whether the prediction is correct (0 or 1)
 
     ECE = sum_b |B_b| / N × |acc(B_b) - conf(B_b)|
-    完美校准时 ECE = 0
+    Perfect calibration gives ECE = 0.
     """
     bin_edges  = np.linspace(0, 1, n_bins + 1)
     ece        = 0.0
@@ -88,7 +88,7 @@ class TemperatureScaler(torch.nn.Module):
 
 @torch.no_grad()
 def collect_logits(model, loader, device) -> tuple:
-    """收集验证集的全部 logits 和 labels"""
+    """Collect all logits and labels from the validation set."""
     model.eval()
     all_logits, all_labels = [], []
 

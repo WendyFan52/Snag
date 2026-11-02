@@ -1,11 +1,11 @@
 """
-推理后处理 — postprocess.py
+Inference postprocessing - postprocess.py
 -----------------------------------------------------------------
-解决两个核心问题：
-  ④ 黑边(NoData)误推理 → NoData 掩膜
-  ⑤ 像素预测→对象级输出 → 连通域分析 + GeoJSON
+Postprocessing tasks:
+  NoData masking to exclude predictions in black border regions.
+  Connected-component analysis and GeoJSON export of pixel predictions as objects.
 
-用法（由 inference.py 自动调用，也可单独使用）：
+Usage (called automatically by inference.py or used independently):
   from postprocess import postprocess
   results = postprocess(prob_map, image_norm, image_rgb,
                         ref_tif_path, model_name)
@@ -22,23 +22,23 @@ import config
 
 
 # =================================================================
-# ④ NoData 掩膜
+# NoData mask
 # =================================================================
 def compute_nodata_mask(image_norm: np.ndarray,
                         threshold: float = config.NODATA_THRESHOLD
                         ) -> np.ndarray:
     """
-    检测影像中的 NoData（黑色填充）区域。
-    所有波段之和 < threshold 的像素视为 NoData。
+    Detect NoData (black fill) regions in the image.
+    Pixels whose summed band values are below threshold are treated as NoData.
 
-    输入: image_norm (H, W, C) float32 [0,1]
-    返回: (H, W) bool，True = 有效像素
+    Input: image_norm (H, W, C) float32 [0, 1]
+    Return: (H, W) bool, True = valid pixel.
     """
     raw_view = image_norm[..., :config.RAW_CHANNELS]
     band_sum = raw_view.sum(axis=-1)      # (H, W)
     valid    = (band_sum > threshold).astype(np.uint8) * 255
 
-    # 形态学平滑：消除小噪声
+    # Morphological smoothing to remove small noise regions
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     valid  = cv2.morphologyEx(valid, cv2.MORPH_CLOSE, kernel)
     valid  = cv2.morphologyEx(valid, cv2.MORPH_OPEN,  kernel)
@@ -48,9 +48,9 @@ def compute_nodata_mask(image_norm: np.ndarray,
 def apply_nodata_mask(prob_map: np.ndarray,
                       valid_mask: np.ndarray) -> tuple:
     """
-    将 NoData 区域的概率和预测结果清零。
+    Set probabilities and predictions to zero in NoData regions.
 
-    返回: (masked_prob, pred_map)
+    Return: (masked_prob, pred_map).
     """
     masked = prob_map.copy()
     masked[:, ~valid_mask] = 0.0
@@ -60,7 +60,7 @@ def apply_nodata_mask(prob_map: np.ndarray,
 
 
 # =================================================================
-# ⑤ 对象级后处理
+# Object-level postprocessing
 # =================================================================
 def extract_objects(pred_map:    np.ndarray,
                     prob_map:    np.ndarray,
@@ -68,8 +68,8 @@ def extract_objects(pred_map:    np.ndarray,
                     min_area_px: int   = config.MIN_OBJ_AREA_PX,
                     max_area_px: int   = 100000) -> list:
     """
-    连通域分析，提取目标类别的对象列表。
-    每个对象包含：面积、质心、置信度、轮廓。
+    Extract objects of the target class using connected-component analysis.
+    Each object includes its area, centroid, confidence, and contour.
     """
     binary = ((pred_map == target_cls) * 255).astype(np.uint8)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -117,9 +117,9 @@ def draw_objects(image_rgb: np.ndarray,
                  objects:   list,
                  conf_thr:  float = config.CONF_THRESHOLD) -> np.ndarray:
     """
-    在影像上绘制检测对象：
-      · 高置信度→橙红轮廓，低置信度→蓝灰
-      · 显示置信度数值
+    Draw detected objects on the image:
+      - Orange-red outlines for high confidence; blue-gray outlines for low confidence
+      - Display confidence values
     """
     canvas = image_rgb.copy()
     for obj in objects:
@@ -149,7 +149,7 @@ def save_geojson(objects:      list,
                  ref_tif_path: str,
                  out_path:     str,
                  conf_thr:     float = config.CONF_THRESHOLD):
-    """将检测对象保存为 GeoJSON（可在 QGIS 中直接加载）"""
+    """Save detected objects as GeoJSON for direct loading in QGIS."""
     with rasterio.open(ref_tif_path) as src:
         transform = src.transform
         crs_str   = src.crs.to_wkt() if src.crs else None
@@ -189,11 +189,11 @@ def save_geojson(objects:      list,
     }
     with open(out_path, "w") as f:
         json.dump(geojson, f, indent=2)
-    print(f"  ✔ GeoJSON  → {out_path}  ({len(features)} 个对象)")
+    print(f"  [OK] GeoJSON -> {out_path}  ({len(features)} objects)")
 
 
 # =================================================================
-# 统一入口
+# Postprocessing entry point
 # =================================================================
 def postprocess(prob_map:     np.ndarray,
                 image_norm:   np.ndarray,
@@ -204,39 +204,39 @@ def postprocess(prob_map:     np.ndarray,
                 conf_thr:     float = config.CONF_THRESHOLD,
                 min_area_px:  int   = config.MIN_OBJ_AREA_PX) -> dict:
     """
-    完整后处理：
-      1. NoData 掩膜（过滤黑边）
-      2. 连通域对象提取
-      3. 对象检测图
-      4. GeoJSON 输出
+    Complete postprocessing pipeline:
+      1. NoData mask to exclude black borders
+      2. Connected-component object extraction
+      3. Object detection visualization
+      4. GeoJSON export
 
-    返回结果字典供外部使用。
+    Return a results dictionary for use by callers.
     """
     stem   = os.path.splitext(os.path.basename(ref_tif_path))[0]
     prefix = os.path.join(config.OUTPUT_DIR, f"{stem}_{model_name}")
 
-    # 1. NoData 掩膜
+    # 1. NoData mask
     valid_mask        = compute_nodata_mask(image_norm)
     masked_prob, pred = apply_nodata_mask(prob_map, valid_mask)
 
     nodata_pct = (1 - valid_mask.mean()) * 100
-    print(f"  NoData 区域: {nodata_pct:.1f}%  "
-          f"有效像素: {valid_mask.mean()*100:.1f}%")
+    print(f"  NoData area: {nodata_pct:.1f}%  "
+          f"valid pixels: {valid_mask.mean()*100:.1f}%")
 
-    # 2. 对象提取
+    # 2. Object extraction
     objects = extract_objects(pred,
                               masked_prob,
                               target_cls=target_cls,
                               min_area_px=min_area_px)
     hi_conf = sum(1 for o in objects if o["mean_confidence"] >= conf_thr)
     print(f"  Class{target_cls}({config.CLASS_NAMES.get(target_cls)}) "
-          f"对象: 共{len(objects)}个  置信度>={conf_thr:.2f}: {hi_conf}个")
+          f"Objects: {len(objects)} total; confidence>={conf_thr:.2f}: {hi_conf}")
 
-    # 3. 对象检测图
+    # 3. Object detection visualization
     obj_img = draw_objects(image_rgb, objects, conf_thr)
     obj_out = prefix + f"-class{target_cls}-objects.png"
     Image.fromarray(obj_img).save(obj_out)
-    print(f"  ✔ 对象图   → {obj_out}")
+    print(f"  [OK] Object visualization -> {obj_out}")
 
     # 4. GeoJSON
     geo_out = prefix + f"-class{target_cls}-objects.geojson"

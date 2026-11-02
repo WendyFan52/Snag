@@ -1,26 +1,26 @@
 """
-遥感指数可分性分析 — analyze_indices.py
+Remote sensing index separability analysis - analyze_indices.py
 =================================================================
-对每个指数计算 Dead(1) vs Living(2) 的区分能力：
+Evaluate how well each index separates Dead(1) from Living(2):
 
-指标：
+Metrics:
   1. Jeffries-Matusita (JM) distance [0,2]
-     越接近2 = 两类完全可分，越接近0 = 完全重叠
-     > 1.8 = 优秀，1.0-1.8 = 一般，< 1.0 = 差
+     Values near 2 indicate complete separation; values near 0 indicate complete overlap.
+     > 1.8 = excellent, 1.0-1.8 = moderate, < 1.0 = poor
 
   2. Separability ratio = |mean_dead - mean_live| / (std_dead + std_live)
-     越高越好
+     Higher is better.
 
-  3. Overlap ratio = 两类分布重叠面积（0=不重叠，1=完全重叠）
-     越低越好
+  3. Overlap ratio = overlapping area of the two distributions (0=none, 1=complete).
+     Lower is better.
 
-用法：
-  python analyze_indices.py --band 4band   # 分析4波段
-  python analyze_indices.py --band 8band   # 分析8波段
-  python analyze_indices.py                # 两者都分析
+Usage:
+  python analyze_indices.py --band 4band   # Analyze four-band imagery
+  python analyze_indices.py --band 8band   # Analyze eight-band imagery
+  python analyze_indices.py                # Analyze both
 
-读取: tiles_{band}/images/ 中的TIF切片
-      tiles_{band}/masks/  中的PNG标注
+Inputs: TIF tiles in tiles_{band}/images/
+      PNG labels in tiles_{band}/masks/
 =================================================================
 """
 
@@ -65,7 +65,7 @@ def jm_distance(p1: np.ndarray, p2: np.ndarray,
 
 def overlap_ratio(p1: np.ndarray, p2: np.ndarray,
                   n_bins: int = 100) -> float:
-    """分布重叠面积（0=不重叠，1=完全重叠）"""
+    """Distribution overlap area (0=no overlap, 1=complete overlap)."""
     all_vals = np.concatenate([p1, p2])
     lo, hi = np.percentile(all_vals, 1), np.percentile(all_vals, 99)
     if hi <= lo:
@@ -82,14 +82,14 @@ def collect_pixels(img_dir: str, mask_dir: str,
                    raw_ch: int,
                    max_samples: int = 5000) -> dict:
     """
-    从切片中随机采样 Dead(1) 和 Living(2) 像元。
-    返回每个指数的像元值字典。
+    Randomly sample Dead(1) and Living(2) pixels from tiles.
+    Return a dictionary of pixel values for each index.
     """
     tif_files = sorted(glob.glob(os.path.join(img_dir, "*.tif")))
     if not tif_files:
         raise RuntimeError(f"No TIF files in {img_dir}")
 
-    # 计算各类指数
+    # Compute spectral indices
     if raw_ch == 4:
         compute_fn = compute_indices_4band
         names = INDEX_NAMES_4BAND
@@ -159,7 +159,7 @@ def collect_pixels(img_dir: str, mask_dir: str,
 
 def analyze_and_plot(pixels: dict, names: list,
                      band_mode: str, out_dir: str):
-    """计算可分性指标并绘图"""
+    """Compute separability metrics and plot the results."""
     results = []
     for name in names:
         dead = np.array(pixels[name]["dead"])
@@ -194,12 +194,12 @@ def analyze_and_plot(pixels: dict, names: list,
           f"{'Overlap':>8} {'mean_dead':>10} {'mean_live':>10}")
     print(f"  {'-'*70}")
     for r in results:
-        grade = "★★★" if r["jm"] > 1.5 else "★★ " if r["jm"] > 1.0 else "★  "
+        grade = "excellent" if r["jm"] > 1.5 else "good" if r["jm"] > 1.0 else "poor"
         print(f"  {r['name']:<12} {r['jm']:>8.4f} {r['sep']:>10.4f} "
               f"{r['overlap']:>8.4f} {r['mean_dead']:>10.4f} "
               f"{r['mean_live']:>10.4f}  {grade}")
     print(f"{'='*72}")
-    print("  ★★★ JM>1.5 excellent   ★★ JM>1.0 good   ★ JM<1.0 poor\n")
+    print("  JM>1.5: excellent; otherwise JM>1.0: good; otherwise: poor\n")
 
     # Plot: bar chart of JM distances
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))

@@ -1,50 +1,50 @@
 """
-软标签切片生成脚本 — prepare_data_softlabel.py
+Generate soft-label tiles - prepare_data_softlabel.py
 =================================================================
-替代 prepare_data.py，生成三种输出：
+Alternative to prepare_data.py with the following outputs:
 
-  images/{tile}.tif     — 影像切片（与 prepare_data.py 相同）
-  masks/{tile}.png      — 硬标签 mask（与 prepare_data.py 相同，用于评估）
-  softlabels/{tile}.npy — 软标签 (NUM_CLASSES+1, H, W) float32
-  lci/{tile}.npy        — LCI 权重图 (H, W) float32
+  images/{tile}.tif     - image tiles (same as prepare_data.py)
+  masks/{tile}.png      - hard-label masks (same as prepare_data.py, for evaluation)
+  softlabels/{tile}.npy - soft labels (NUM_CLASSES+1, H, W) float32
+  lci/{tile}.npy        - LCI weight maps (H, W) float32
 
-什么是软标签（Soft Label）？
+Soft labels:
 -----------------------------------------------------------------
-普通硬标签：每个像元只有一个类别，例如 mask[y,x] = 1（死树）
-软标签：每个像元有一组概率，例如 softlabel[:,y,x] = [0,0.65,0.35,0,0,0]
-        表示该像元 65% 是死树，35% 是活树
+Hard labels assign one class per pixel, e.g. mask[y,x] = 1 (dead tree).
+Soft labels assign class probabilities, e.g. softlabel[:,y,x] = [0,0.65,0.35,0,0,0].
+        This represents 65% dead-tree coverage and 35% living-tree coverage.
 
-为什么需要软标签？
+Motivation:
 -----------------------------------------------------------------
-PlanetScope 3m 像元比单株树冠大。图斑边界处的像元同时包含多个类别。
-  - 硬标签：强制给边界像元分配一个类别 → 引入系统性错误
-  - 软标签：按实际面积比例分配 → 训练信号更真实
+PlanetScope 3 m pixels exceed individual crown sizes. Polygon boundary pixels contain multiple classes.
+  - Hard labels force one class onto boundary pixels, introducing systematic errors.
+  - Soft labels reflect actual area fractions, providing more representative training targets.
 
-计算方法：
+Computation:
 -----------------------------------------------------------------
-对每个像元，用 SOFT_LABEL_SUBGRID × SOFT_LABEL_SUBGRID 的子格网
-细分该像元，统计各类别覆盖的子格数，换算为面积比例。
+Subdivide each pixel using a SOFT_LABEL_SUBGRID x SOFT_LABEL_SUBGRID grid,
+count the subcells covered by each class, and convert the counts to area fractions.
 
-Dead/Living 边界用更细的格网（subgrid=20），因为这对最难区分。
-其他边界用标准格网（subgrid=5~8）。
+Use a finer grid (subgrid=20) at Dead/Living boundaries, the hardest pair to distinguish.
+Use the standard grid (subgrid=5..8) at other boundaries.
 
-LCI（Label Confidence Index）：
+LCI (Label Confidence Index):
 -----------------------------------------------------------------
 LCI[pixel] = max(class_coverage_ratio)
-  LCI=1.0 → 像元完全属于一个类（纯净）
-  LCI=0.65 → 主类占 65%，混合像元
-  LCI=0.3  → 高度混合
+  LCI=1.0 -> the pixel belongs entirely to one class (pure)
+  LCI=0.65 -> the dominant class covers 65% (mixed pixel)
+  LCI=0.3  -> highly mixed pixel
 
-训练时：loss_weight[pixel] = LCI[pixel]
-纯净像元对训练贡献更大，混合像元贡献小但不为零。
+During training: loss_weight[pixel] = LCI[pixel].
+Pure pixels contribute more to training; mixed pixels contribute less but retain nonzero weight.
 
-损失函数：
+Loss function:
 -----------------------------------------------------------------
-软标签训练使用 KL 散度替代交叉熵：
+Soft-label training uses KL divergence instead of cross-entropy:
   soft_CE = -sum(softlabel * log(softmax(logits)))
-这等价于用软标签作为目标分布。
+This uses soft labels as the target distribution.
 
-用法：
+Usage:
   python prepare_data_softlabel.py
   python prepare_data_softlabel.py --dry_run
 =================================================================
@@ -75,16 +75,16 @@ except ImportError as e:
 import config
 from input_preprocessing import preprocessing_tags, sr_to_feature_stack
 
-# 软标签输出目录（新增）
+# Soft-label output directory
 SOFTLABEL_DIR = os.path.join(config.DATA_ROOT, "softlabels")
 os.makedirs(SOFTLABEL_DIR, exist_ok=True)
 
 VALID_CLASSES = list(range(1, config.NUM_CLASSES + 1))
-N_OUT = config.NUM_CLASSES + 1   # 包含 ignore slot 0
+N_OUT = config.NUM_CLASSES + 1   # Include ignore slot 0
 
 
 # =================================================================
-# 工具函数（与 prepare_data.py 共用）
+# Utility functions shared with prepare_data.py
 # =================================================================
 def find_shp_for_tif(tif_path: str) -> Optional[str]:
     stem      = Path(tif_path).stem
@@ -98,7 +98,7 @@ def find_shp_for_tif(tif_path: str) -> Optional[str]:
 
 
 def align_crs(gdf, tif_crs):
-    """用 pyproj 精确比较 CRS，不同则重投影。"""
+    """Compare CRSs using pyproj and reproject when they differ."""
     if gdf.crs is None:
         raise RuntimeError("SHP CRS is missing; refuse to assume it matches TIF")
     try:
@@ -112,7 +112,7 @@ def align_crs(gdf, tif_crs):
 
 
 def read_and_prepare(tif_path: str) -> np.ndarray:
-    """读取 TIF → 固定比例转换为反射率 → 追加遥感指数 → (C, H, W) float32"""
+    """Read TIF -> scale to reflectance -> append spectral indices -> (C, H, W) float32."""
     with rasterio.open(tif_path) as src:
         data = src.read().astype(np.float32)
     raw_ch = config.RAW_CHANNELS
@@ -138,8 +138,8 @@ def save_tile_tif(data: np.ndarray, out_path: str):
 
 def load_and_prepare_shapes(shp_path: str, tif_path: str):
     """
-    加载 SHP，统一 CRS，过滤非法类别，
-    按类别降序排列（Dead=1 最后，覆盖其他类别）。
+    Load SHP labels, align the CRS, filter invalid classes,
+    and sort by descending class ID (Dead=1 is drawn last and overwrites other classes).
     """
     with rasterio.open(tif_path) as src:
         tif_crs   = src.crs
@@ -163,7 +163,7 @@ def load_and_prepare_shapes(shp_path: str, tif_path: str):
     if not shapes:
         raise RuntimeError(f"No rasterizable valid class geometries in SHP: {shp_path}")
 
-    # Dead(1) 最后绘制 → 覆盖其他类别
+    # Draw Dead(1) last to overwrite other classes
     shapes = sorted(shapes, key=lambda x: -x[1])
     return shapes, transform, H, W
 
@@ -174,35 +174,35 @@ def load_and_prepare_shapes(shp_path: str, tif_path: str):
 
 
 # =================================================================
-# 核心：软标签计算
+# Soft-label computation
 # =================================================================
 def compute_softlabel_map(shapes: list,
                           transform,
                           H: int, W: int) -> tuple:
     """
-    向量化软标签计算 — 用整图高分辨率栅格化替代逐像元循环。
+    Vectorized soft labels using full-image high-resolution rasterization instead of per-pixel loops.
 
-    原方法：每个像元单独调用 rasterize() → 百万次调用 → 极慢
-    新方法：
-      1. 将整张影像一次性栅格化到 (H*sg × W*sg) 高分辨率
-      2. reshape 成 (H, sg, W, sg)，统计各类别占子格数比例
-      3. 整张影像的软标签在 1 次 rasterize() 调用中完成
+    Per-pixel rasterize() calls require millions of operations and are slow.
+    Vectorized procedure:
+      1. Rasterize the whole image at (H*sg x W*sg) resolution in one call.
+      2. Reshape to (H, sg, W, sg) and compute class fractions from subcell counts.
+      3. One rasterize() call produces the full image's soft labels at each grid resolution.
 
-    速度提升：从数小时 → 每样本数秒
+    This reduces processing time from hours to seconds per sample.
 
-    Dead/Living 边界精度处理：
-      对 Dead(1) 和 Living(2) 各自的图斑，用更细的 sg=20 分别做一次
-      高分辨率栅格化，修正这两类的覆盖比例（最重要的边界）。
-      其他类别用 sg=base（默认5）。
+    Dead/Living boundary precision:
+      Rasterize Dead(1) and Living(2) polygons separately on a finer sg=20 grid
+      to refine their coverage fractions at these critical boundaries.
+      Use sg=base (default 5) for other classes.
 
-    返回：
+    Returns:
       softlabel (N_OUT, H, W) float32
       lci_map   (H, W)        float32
     """
     base_sg = getattr(config, 'SOFT_LABEL_SUBGRID', 5)
-    dl_sg   = config.get_local_subgrid(1, 2, base_sg)  # Dead/Living精细格，默认20
+    dl_sg   = config.get_local_subgrid(1, 2, base_sg)  # Fine Dead/Living grid, default 20
 
-    # ── 1. 粗栅格化定位标注区域 ────────────────────────────────
+    # 1. Locate labeled regions through coarse rasterization
     hard_mask = rasterize(shapes, (H, W), transform=transform,
                           fill=0, dtype=np.int32, all_touched=False)
     soft_mask = rasterize(shapes, (H, W), transform=transform,
@@ -211,22 +211,22 @@ def compute_softlabel_map(shapes: list,
     softlabel = np.zeros((N_OUT, H, W), dtype=np.float32)
     lci_map   = np.zeros((H, W),        dtype=np.float32)
 
-    # 未标注像元 → ignore slot
+    # Assign unlabeled pixels to the ignore slot
     softlabel[0, soft_mask == 0] = 1.0
 
     if not shapes:
         return softlabel, lci_map
 
-    # ── 2. 整图高分辨率栅格化（base_sg 倍）──────────────────────
-    # 一次调用替代所有逐像元 rasterize()
+    # 2. Rasterize the full image at base_sg times the original resolution
+    # Replace per-pixel rasterize() calls with one full-image call
     from rasterio.transform import Affine
 
     def make_hires_transform(transform, sg):
-        """将 transform 缩放 sg 倍得到高分辨率 transform"""
+        """Scale the transform by sg to obtain the high-resolution transform."""
         return Affine(transform.a / sg, transform.b, transform.c,
                       transform.d, transform.e / sg, transform.f)
 
-    # base_sg 分辨率：覆盖除 Dead/Living 之外的所有类别
+    # Use base_sg resolution for all classes except Dead/Living
     hires_tfm_base = make_hires_transform(transform, base_sg)
     hires_mask_base = rasterize(shapes,
                                 (H * base_sg, W * base_sg),
@@ -234,7 +234,7 @@ def compute_softlabel_map(shapes: list,
                                 fill=0, dtype=np.int32,
                                 all_touched=True)
 
-    # Dead/Living 精细分辨率（dl_sg 倍）
+    # Use finer resolution for Dead/Living (dl_sg times the original resolution)
     hires_tfm_dl = make_hires_transform(transform, dl_sg)
     hires_mask_dl = rasterize(shapes,
                               (H * dl_sg, W * dl_sg),
@@ -242,17 +242,17 @@ def compute_softlabel_map(shapes: list,
                               fill=0, dtype=np.int32,
                               all_touched=True)
 
-    # ── 3. 聚合：高分辨率 → 原始分辨率的覆盖比例 ──────────────
+    # 3. Aggregate high-resolution labels to original-resolution coverage fractions
     # reshape: (H*sg, W*sg) → (H, sg, W, sg) → mean over sg dims
     def coverage(hires: np.ndarray, sg: int, cls: int) -> np.ndarray:
-        """返回 (H, W) float32，每个像元中 cls 类的覆盖比例"""
+        """Return (H, W) float32 coverage fractions for class cls in each pixel."""
         return ((hires == cls)
                 .reshape(H, sg, W, sg)
                 .mean(axis=(1, 3))
                 .astype(np.float32))
 
-    # 计算各类别覆盖比例
-    # Dead(1) 和 Living(2) 用精细格，其他用粗格
+    # Compute coverage fractions for each class
+    # Use the fine grid for Dead(1)/Living(2), and the coarse grid for other classes
     raw_cov = {}
     for cls in VALID_CLASSES:
         if cls in (1, 2):
@@ -260,24 +260,24 @@ def compute_softlabel_map(shapes: list,
         else:
             raw_cov[cls] = coverage(hires_mask_base, base_sg, cls)
 
-    # ── 4. 过滤噪声、归一化、填充 softlabel ──────────────────────
+    # 4. Filter noise, normalize, and populate softlabel
     min_ratio = getattr(config, 'SOFT_LABEL_MIN_RATIO', 0.05)
 
-    # 叠加所有类别的覆盖比例
+    # Sum coverage fractions over all classes
     total_cov = np.zeros((H, W), dtype=np.float32)
     for cls in VALID_CLASSES:
         cov = raw_cov[cls].copy()
-        cov[cov < min_ratio] = 0.0   # 过滤噪声
+        cov[cov < min_ratio] = 0.0   # Filter noise
         if cls > 0:
             softlabel[cls] += cov
         total_cov += cov
 
-    # 归一化（只对有标注的像元）
+    # Normalize labeled pixels only
     labeled = (soft_mask > 0) & (total_cov > 0)
     for c in range(N_OUT):
         softlabel[c, labeled] /= total_cov[labeled]
 
-    # 保底：有标注但所有类别都被过滤掉 → 用硬标签
+    # Fall back to hard labels if filtering removes every class from a labeled pixel
     no_coverage = (soft_mask > 0) & (total_cov == 0)
     if no_coverage.any():
         for py, px in zip(*np.where(no_coverage)):
@@ -285,11 +285,11 @@ def compute_softlabel_map(shapes: list,
             if cls > 0:
                 softlabel[cls, py, px] = 1.0
 
-    # 未标注像元确保 ignore slot = 1
+    # Ensure ignore slot = 1 for unlabeled pixels
     softlabel[0, soft_mask == 0] = 1.0
 
-    # ── 5. LCI = 最大类别覆盖比例（纯净度）──────────────────────
-    # 取 softlabel[1:] 的最大值（排除 ignore slot 0）
+    # 5. LCI = maximum class coverage fraction (purity)
+    # Take the maximum of softlabel[1:], excluding ignore slot 0
     lci_map = softlabel[1:].max(axis=0)
 
     return softlabel, lci_map
@@ -298,7 +298,7 @@ def compute_softlabel_map(shapes: list,
 
 
 # =================================================================
-# 切片保存
+# Save tiles
 # =================================================================
 def tile_and_save(img_data:   np.ndarray,
                   hard_mask:  np.ndarray,
@@ -322,7 +322,7 @@ def tile_and_save(img_data:   np.ndarray,
             stats["total"] += 1
             tile_mask = hard_mask[y:y+ts, x:x+ts]
 
-            # 过滤低标注率切片
+            # Filter tiles with insufficient label coverage
             labeled_ratio = (tile_mask > 0).sum() / (ts * ts)
             if labeled_ratio < mrat:
                 stats["skipped"] += 1
@@ -349,7 +349,7 @@ def tile_and_save(img_data:   np.ndarray,
 
 
 # =================================================================
-# 主流程
+# Main workflow
 # =================================================================
 def main(dry_run: bool = False):
     if not dry_run:
@@ -391,25 +391,25 @@ def main(dry_run: bool = False):
             raise FileNotFoundError(f"No matching SHP found for sample_id={sample_id}, tif={tif_path}")
 
         try:
-            # 1. 加载图斑
+            # 1. Load polygons
             shapes, transform, H, W = load_and_prepare_shapes(
                 shp_path, tif_path)
             if not shapes:
                 raise RuntimeError(f"No valid shapes for sample_id={sample_id}, shp={shp_path}")
 
-            # 2. 硬标签（用于 mask 和评估）
+            # 2. Hard labels for masks and evaluation
             hard_mask = rasterize(shapes, (H, W), transform=transform,
                                   fill=0, dtype=np.int32, all_touched=False)
             hard_mask = hard_mask.astype(np.uint8)
 
-            # 3. 软标签 + LCI（核心计算）
+            # 3. Compute soft labels and LCI
             softlabel, lci_map = compute_softlabel_map(
                 shapes, transform, H, W)
 
-            # 4. 影像
+            # 4. Read imagery
             img_data = read_and_prepare(tif_path)
 
-            # 5. 切片保存
+            # 5. Save tiles
             s = tile_and_save(img_data, hard_mask, softlabel,
                               lci_map, sample_id, dry_run)
 

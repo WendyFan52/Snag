@@ -1,19 +1,19 @@
 """
-模型定义 — models.py
+Model definitions - models.py
 -----------------------------------------------------------------
-三个语义分割模型：
-  1. UNet + EfficientNet-B4       (CNN，轻量基线)
-  2. SegFormer-B2                 (Transformer，全局注意力)
-  3. DINOv2-UNet (ViT-L backbone) (基础模型，稀疏标注最优)
+Three semantic segmentation models:
+  1. UNet + EfficientNet-B4       (CNN, lightweight baseline)
+  2. SegFormer-B2                 (Transformer, global attention)
+  3. DINOv2-UNet (ViT-L backbone) (foundation model for sparse labels)
 
-DINOv2 设计要点：
-  · 通道投影层：IN_CHANNELS → 3  (1×1 conv，可学习)
-  · 分辨率归一化：训练时 Resize 到 DINOV2_TILE_SIZE(224)；推理时对齐 patch14 整倍数
-  · ViT-L backbone：默认冻结，可选 LoRA 微调
-  · 解码头：4层特征多尺度融合 → FPN式上采样 → 像素分类
-  · 推理时还原到原始分辨率
+DINOv2 design:
+  - Channel projection: IN_CHANNELS -> 3 (learnable 1x1 convolution).
+  - Resolution alignment: resize to DINOV2_TILE_SIZE(224) during training; align to patch14 at inference.
+  - ViT-L backbone: frozen by default, with optional LoRA fine-tuning.
+  - Decoder: fuse features from four layers, upsample with an FPN-style head, then classify pixels.
+  - Restore the original resolution during inference.
 
-损失函数定义在 models.py，改进版在 models_improved.py。
+Base losses are defined in models.py; additional losses are in models_improved.py.
 -----------------------------------------------------------------
 """
 
@@ -45,7 +45,7 @@ class _ResizeLogitsToInput(nn.Module):
 
 
 # =================================================================
-# 模型 1: UNet + EfficientNet-B4
+# Model 1: UNet + EfficientNet-B4
 # =================================================================
 def _build_smp_unet(encoder_name: str,
                     num_classes: int = N_OUT,
@@ -123,7 +123,7 @@ def build_hrnet_w18(num_classes: int = N_OUT,
 
 
 # =================================================================
-# 模型 2: SegFormer-B2
+# Model 2: SegFormer-B2
 # =================================================================
 _SEGFORMER_SPECS = {
     "mit-b2": {"hidden_sizes": [64, 128, 320, 512], "depths": [3, 4, 6, 3], "decoder_hidden_size": 768},
@@ -234,13 +234,13 @@ def build_segformer(num_classes: int = N_OUT,
 
 
 # =================================================================
-# 模型 3: DINOv2-UNet (ViT-L backbone)
+# Model 3: DINOv2-UNet (ViT-L backbone)
 # =================================================================
 
 class ChannelProjection(nn.Module):
     """
-    1×1 卷积将任意通道数投影到 3 通道（DINOv2 期望 RGB 输入）。
-    包含 BN + ReLU，让模型学习最优的波段组合。
+    Project arbitrary input channels to three channels with a 1x1 convolution for DINOv2 RGB input.
+    Include BN and ReLU to learn suitable band combinations.
     """
     def __init__(self, in_ch: int):
         super().__init__()
@@ -249,7 +249,7 @@ class ChannelProjection(nn.Module):
             nn.BatchNorm2d(3),
             nn.ReLU(inplace=True),
         )
-        # 初始化：前3通道复制，其余均分
+        # Initialize by copying the first three channels and distributing the rest evenly
         with torch.no_grad():
             w = torch.zeros(3, in_ch, 1, 1)
             n_copy = min(3, in_ch)
@@ -266,15 +266,15 @@ class ChannelProjection(nn.Module):
 
 class DINOv2Backbone(nn.Module):
     """
-    封装 DINOv2 ViT-L backbone。
-    支持：
-      · 全冻结（仅训练解码头）
-      · 全量微调（更高精度）
-      · LoRA 微调（推荐：平衡效率与精度）
+    Wrap the DINOv2 ViT-L backbone.
+    Supported modes:
+      - Fully frozen backbone (train the decoder only)
+      - Full fine-tuning for higher accuracy
+      - LoRA fine-tuning to balance efficiency and accuracy
 
-    输出每个被选层的 patch 特征，用于多尺度解码。
+    Return patch features from selected layers for multiscale decoding.
     """
-    # 4个抽取层（ViT-L共24层，选第6/12/18/24层，由浅到深）
+    # Extract layers 6/12/18/24 from ViT-L's 24 layers, from shallow to deep
     EXTRACT_LAYERS = [5, 11, 17, 23]
 
     def __init__(self,
@@ -287,7 +287,7 @@ class DINOv2Backbone(nn.Module):
         self.patch_size = config.DINOV2_PATCH_SIZE   # 14
         self.frozen     = frozen
 
-        # 加载预训练权重（torch.hub）
+        # Load pretrained weights through torch.hub
         try:
             self.backbone = torch.hub.load(
                 "facebookresearch/dinov2",
@@ -296,9 +296,9 @@ class DINOv2Backbone(nn.Module):
             )
         except Exception as e:
             raise RuntimeError(
-                f"DINOv2 加载失败: {e}\n"
-                "请确保网络可访问 github.com/facebookresearch/dinov2，\n"
-                "或手动下载权重后修改此处加载逻辑。"
+                f"Failed to load DINOv2: {e}\n"
+                "Ensure github.com/facebookresearch/dinov2 is accessible,\n"
+                "or download the weights manually and adjust the loading code."
             )
 
         if frozen and not use_lora:
@@ -310,8 +310,8 @@ class DINOv2Backbone(nn.Module):
 
     def _apply_lora(self, rank: int):
         """
-        对 ViT-L 的注意力 Q/V 投影层注入 LoRA 适配器。
-        LoRA 参数量：rank × 2 × (1024 × 1024) × 24层 ≈ 仅约 12M 参数
+        Inject LoRA adapters into ViT-L attention Q/V projections.
+        LoRA parameter estimate: rank x 2 x (1024 x 1024) x 24 layers; approximately 12M parameters.
         """
         try:
             from peft import LoraConfig, get_peft_model, TaskType
@@ -324,30 +324,30 @@ class DINOv2Backbone(nn.Module):
             self.backbone = get_peft_model(self.backbone, lora_cfg)
             trainable = sum(p.numel() for p in self.backbone.parameters()
                             if p.requires_grad)
-            print(f"[DINOv2] LoRA 模式：可训练参数 {trainable/1e6:.1f}M")
+            print(f"[DINOv2] LoRA mode: {trainable/1e6:.1f}M trainable parameters")
         except ImportError:
-            print("[DINOv2] peft 未安装，退回到全量微调。"
+            print("[DINOv2] peft is not installed; falling back to full fine-tuning."
                   " pip install peft")
             for p in self.backbone.parameters():
                 p.requires_grad_(True)
 
     def forward(self, x: torch.Tensor) -> list:
         """
-        输入: x (B, 3, H, W)  已归一化
-        输出: 列表，每个元素为 (B, embed_dim, h_i, w_i)
-              其中 h_i = H // patch_size，w_i = W // patch_size
+        Input: x (B, 3, H, W), normalized.
+        Output: a list of tensors shaped (B, embed_dim, h_i, w_i),
+              where h_i = H // patch_size and w_i = W // patch_size.
         """
         B, _, H, W = x.shape
         h_p = H // self.patch_size
         w_p = W // self.patch_size
 
-        # 注册 hook 抽取中间层特征
+        # Register hooks to extract intermediate features
         features = {}
         hooks = []
         for layer_idx in self.EXTRACT_LAYERS:
             def make_hook(idx):
                 def hook(_, __, output):
-                    # output: (B, 1 + h_p*w_p, embed_dim)  去掉 [CLS]
+                    # output: (B, 1 + h_p*w_p, embed_dim); remove [CLS]
                     features[idx] = output[:, 1:, :]
                 return hook
             h = self.backbone.blocks[layer_idx].register_forward_hook(
@@ -361,7 +361,7 @@ class DINOv2Backbone(nn.Module):
         for h in hooks:
             h.remove()
 
-        # 重排为空间格式
+        # Reshape to spatial feature maps
         out = []
         for layer_idx in self.EXTRACT_LAYERS:
             feat = features[layer_idx]               # (B, h_p*w_p, C)
@@ -374,16 +374,16 @@ class DINOv2Backbone(nn.Module):
 
 class DINOv2DecodeHead(nn.Module):
     """
-    多尺度特征融合解码头（类 FPN 结构）：
-      · 4 层特征各自经过 1×1 投影到 decode_dim
-      · 逐步上采样并相加融合
-      · 最终 1×1 conv 输出分类 logits
+    Multiscale feature fusion decoder with an FPN-style structure:
+      - Project each of four feature maps to decode_dim with a 1x1 convolution.
+      - Upsample and fuse features through addition.
+      - Produce class logits with a final 1x1 convolution.
 
-    特征分辨率（ViT-L patch14，输入 518×518）：
+    Feature resolutions (ViT-L patch14, input 518x518):
       Layer 5  → 37×37
       Layer 11 → 37×37
       Layer 17 → 37×37
-      Layer 23 → 37×37（所有层分辨率相同，大小取决于输入）
+      Layer 23 -> 37x37 (all layers share a resolution determined by the input size)
     """
     def __init__(self,
                  embed_dim:   int = config.DINOV2_EMBED_DIM,
@@ -392,7 +392,7 @@ class DINOv2DecodeHead(nn.Module):
         super().__init__()
         n_levels = len(DINOv2Backbone.EXTRACT_LAYERS)
 
-        # 每层特征降维
+        # Reduce channel dimensions for each feature map
         self.proj = nn.ModuleList([
             nn.Sequential(
                 nn.Conv2d(embed_dim, decode_dim, 1, bias=False),
@@ -402,7 +402,7 @@ class DINOv2DecodeHead(nn.Module):
             for _ in range(n_levels)
         ])
 
-        # 融合后精炼
+        # Refine fused features
         self.fuse = nn.Sequential(
             nn.Conv2d(decode_dim * n_levels, decode_dim, 3,
                       padding=1, bias=False),
@@ -414,15 +414,15 @@ class DINOv2DecodeHead(nn.Module):
             nn.GELU(),
         )
 
-        # 分类头
+        # Classification head
         self.cls_head = nn.Conv2d(decode_dim, num_classes, 1)
 
     def forward(self, features: list, target_size: tuple) -> torch.Tensor:
         """
         features: list of (B, embed_dim, h_p, w_p)
-        target_size: (H_orig, W_orig) 原始影像分辨率
+        target_size: (H_orig, W_orig), the original image resolution.
         """
-        # 所有层上采样到最大分辨率（最后一层），投影降维
+        # Upsample all layers to the largest resolution (the final layer) and project channels
         ref_size = features[-1].shape[-2:]
         projected = []
         for i, feat in enumerate(features):
@@ -431,10 +431,10 @@ class DINOv2DecodeHead(nn.Module):
                                      mode="bilinear", align_corners=False)
             projected.append(self.proj[i](feat))
 
-        # 拼接 + 融合
+        # Concatenate and fuse
         fused  = self.fuse(torch.cat(projected, dim=1))  # (B, dim, h_p, w_p)
 
-        # 上采样到原始分辨率
+        # Upsample to the original resolution
         logits = self.cls_head(fused)
         logits = F.interpolate(logits, size=target_size,
                                mode="bilinear", align_corners=False)
@@ -443,16 +443,16 @@ class DINOv2DecodeHead(nn.Module):
 
 class DINOv2UNet(nn.Module):
     """
-    完整的 DINOv2-UNet 语义分割模型：
-      ChannelProjection → 分辨率对齐 → DINOv2 ViT-L → DecodeHead
+    Complete DINOv2-UNet semantic segmentation model:
+      ChannelProjection -> Resolution alignment -> DINOv2 ViT-L -> DecodeHead
 
-    前向流程：
+    Forward pass:
       (B, IN_CH, H, W)
-        → 通道投影 → (B, 3, H, W)
-        → Resize 到 patch14 对齐尺寸（训练: DINOV2_TILE_SIZE=224，推理: 输入对齐）
-        → DINOv2 ViT-L 提取多层特征
-        → 解码头融合上采样
-        → 双线性还原到 (H, W)
+        -> Channel projection -> (B, 3, H, W)
+        -> Resize to patch14-aligned dimensions (training: DINOV2_TILE_SIZE=224; inference: align input)
+        -> Extract features from multiple DINOv2 ViT-L layers
+        -> Fuse and upsample with the decoder
+        -> Restore (H, W) by bilinear interpolation
         → (B, N_OUT, H, W) logits
     """
     def __init__(self,
@@ -477,7 +477,7 @@ class DINOv2UNet(nn.Module):
             num_classes = num_classes,
         )
 
-        # DINOv2 ImageNet 归一化（backbone 内部用，与训练数据归一化分开）
+        # ImageNet normalization for the DINOv2 backbone, separate from training data normalization
         self.register_buffer(
             "dino_mean",
             torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -488,31 +488,31 @@ class DINOv2UNet(nn.Module):
         )
 
     def _align_size(self, size: int) -> int:
-        """向上对齐到 patch_size 的整倍数，最小为 patch_size"""
+        """Round up to a multiple of patch_size, with patch_size as the minimum."""
         p = self.patch_size
         return max(p, ((size + p - 1) // p) * p)
 
     def _compute_dino_size(self, H: int, W: int) -> tuple:
         """
-        计算送入 DINOv2 的分辨率：
-          · 保持宽高比
-          · 对齐到 patch_size(14) 的整倍数
-          · 不超过 max_infer_size（避免 OOM）
-          · 最小为 4×patch_size = 56（至少 4×4 个 patch token）
+        Determine the input resolution for DINOv2:
+          - Preserve the aspect ratio.
+          - Align dimensions to multiples of patch_size(14).
+          - Limit dimensions to max_infer_size to avoid out-of-memory errors.
+          - Use a minimum of 4xpatch_size = 56 (at least 4x4 patch tokens).
 
-        例：
-          64×64   → 64×64  (已是 ≥56 且是 14 倍数，直接用)
-             实际：64/14=4.57 → 对齐到 70×70  (5×5=25 tokens)
-          224×224 → 224×224 (16×16=256 tokens，训练标准尺寸)
-          256×192 → 252×196 (18×14 × 14×14，保持宽高比)
+        Examples:
+          64x64   -> align to the next patch14 multiple
+             64/14=4.57 -> 70x70 (5x5=25 tokens)
+          224x224 -> 224x224 (16x16=256 tokens, the training resolution)
+          256x192 -> 252x196 (18x14 patches, approximately preserving the aspect ratio)
         """
         max_s = self.max_infer_size
-        # 缩放：长边不超过 max_infer_size
+        # Scale so that the longer side does not exceed max_infer_size
         if max(H, W) > max_s:
             scale = max_s / max(H, W)
             H = int(H * scale)
             W = int(W * scale)
-        # 对齐到 patch_size 整倍数，最小 4×patch_size
+        # Align to patch_size multiples, with a minimum of 4xpatch_size
         min_s = 4 * self.patch_size  # 56
         dino_h = max(min_s, self._align_size(H))
         dino_w = max(min_s, self._align_size(W))
@@ -522,24 +522,24 @@ class DINOv2UNet(nn.Module):
         B, C, H, W = x.shape
         orig_size = (H, W)
 
-        # 1. 通道投影：IN_CHANNELS → 3
+        # 1. Channel projection: IN_CHANNELS -> 3
         x3 = self.channel_proj(x)                        # (B, 3, H, W)
 
-        # 2. 计算 DINOv2 需要的尺寸并 resize
-        #    · 训练时 H=W=DINOV2_TILE_SIZE(224)：224 对齐后仍为 224
-        #    · 推理时 tile 通常 256+：对齐后为 252/256 等，不超过 max_infer_size
-        #    · 不再强制 resize 到固定 518
+        # 2. Determine the DINOv2 input size and resize
+        #    - Training uses H=W=DINOV2_TILE_SIZE(224), which remains 224 after alignment
+        #    - Inference tiles are usually 256+; align them without exceeding max_infer_size
+        #    - No fixed resize to 518 is required
         dino_h, dino_w = self._compute_dino_size(H, W)
         x_resized = F.interpolate(x3, (dino_h, dino_w),
                                    mode="bilinear", align_corners=False)
 
-        # 3. DINOv2 归一化（backbone 期望 ImageNet 归一化）
+        # 3. Apply ImageNet normalization expected by the DINOv2 backbone
         x_norm = (x_resized - self.dino_mean) / self.dino_std
 
-        # 4. 提取多层特征
+        # 4. Extract features from multiple layers
         features = self.backbone(x_norm)             # list of (B,1024,h_p,w_p)
 
-        # 5. 解码并还原到原始分辨率
+        # 5. Decode and restore the original resolution
         logits = self.decode_head(features, orig_size)
         return logits                                # (B, N_OUT, H, W)
 
@@ -550,16 +550,16 @@ def build_dinov2(num_classes: int  = N_OUT,
                  frozen:      bool = config.DINOV2_FROZEN_BACKBONE,
                  use_lora:    bool = False):
     """
-    构建 DINOv2-UNet (ViT-L)。
+    Build DINOv2-UNet (ViT-L).
 
-    pretrained: 是否加载 DINOv2 预训练权重（通常设 True）
-    frozen:     backbone 是否冻结
-    use_lora:   是否使用 LoRA 微调 backbone（需安装 peft）
+    pretrained: load pretrained DINOv2 weights (usually True).
+    frozen: freeze the backbone.
+    use_lora: fine-tune the backbone with LoRA (requires peft).
     """
     if not pretrained:
         import warnings
         warnings.warn(
-            "DINOv2 在没有预训练权重时性能极差，强烈建议 pretrained=True"
+            "DINOv2 performs poorly without pretrained weights; pretrained=True is strongly recommended"
         )
     return DINOv2UNet(
         num_classes = num_classes,
@@ -570,7 +570,7 @@ def build_dinov2(num_classes: int  = N_OUT,
 
 
 # =================================================================
-# 基础损失函数
+# Base loss functions
 # =================================================================
 class FocalLoss(nn.Module):
     def __init__(self, gamma: float = 2.0,
@@ -650,13 +650,13 @@ class CombinedLoss(nn.Module):
 
 
 # =================================================================
-# 模型 4: SegFormer-B4/B5
+# Model 4: SegFormer-B4/B5
 # =================================================================
 def build_segformer_b4(num_classes: int = N_OUT,
                        in_channels: int = config.IN_CHANNELS,
                        pretrained:  bool = True,
                        decoder_hidden_size: int = None):
-    """SegFormer-B4：比B2参数量更大，特征提取能力更强。"""
+    """SegFormer-B4: more parameters and greater feature extraction capacity than B2."""
     return SegFormerSeg(num_classes, in_channels,
                         "nvidia/mit-b4", pretrained,
                         decoder_hidden_size=decoder_hidden_size)
@@ -666,7 +666,7 @@ def build_segformer_b5(num_classes: int = N_OUT,
                        in_channels: int = config.IN_CHANNELS,
                        pretrained:  bool = True,
                        decoder_hidden_size: int = None):
-    """SegFormer-B5：最大规格，精度最高但显存需求最大。"""
+    """SegFormer-B5: the largest variant, with the highest accuracy and memory requirements."""
     return SegFormerSeg(num_classes, in_channels,
                         "nvidia/mit-b5", pretrained,
                         decoder_hidden_size=decoder_hidden_size)
@@ -674,21 +674,21 @@ def build_segformer_b5(num_classes: int = N_OUT,
 
 
 # =================================================================
-# 模型 6: Mask2Former + Swin backbone
+# Model 6: Mask2Former + Swin backbone
 # =================================================================
 class Mask2FormerSeg(nn.Module):
     """
-    Mask2Former (Cheng et al. CVPR 2022) 语义分割模式。
+    Mask2Former (Cheng et al., CVPR 2022) in semantic segmentation mode.
 
-    参考：
+    References:
       Cheng et al. 2022 "Masked-attention Mask Transformer for Universal Image Segmentation"
-      Gibril et al. 2024 (Remote Sensing) — 多光谱树木制图，Mask2Former 优于 SegFormer
+      Gibril et al. 2024 (Remote Sensing) - multispectral tree mapping; Mask2Former outperformed SegFormer.
 
-    架构：
-      ChannelProjection → Mask2Former (transformers 库)
+    Architecture:
+      ChannelProjection -> Mask2Former (transformers library)
 
-    注：Mask2Former 原生支持语义/实例/全景分割，
-        此处使用语义分割模式 (semantic_segmentation_logits)。
+    Mask2Former supports semantic, instance, and panoptic segmentation.
+        This wrapper uses semantic segmentation (semantic_segmentation_logits).
     """
     def __init__(self,
                  num_classes: int = N_OUT,
@@ -697,7 +697,7 @@ class Mask2FormerSeg(nn.Module):
                  backbone:    str  = "swin-tiny"):
         super().__init__()
 
-        # 多波段投影
+        # Project multispectral bands
         self.proj = ChannelProjection(in_channels)
 
         # Mask2Former from HuggingFace
@@ -733,17 +733,17 @@ class Mask2FormerSeg(nn.Module):
         out  = self.m2f(pixel_values=x)
         logits = out.masks_queries_logits             # (B, Q, Hm, Wm)
 
-        # class_queries_logits: (B, Q, num_labels+1)，最后一列是"无目标"背景
+        # class_queries_logits: (B, Q, num_labels+1); the last column is the no-object class
         sem   = out.class_queries_logits              # (B, Q, num_labels+1)
-        # 取前 num_classes 列（对应我们的类别），丢掉 HuggingFace 的 no-object 列
+        # Keep the first num_classes columns and discard the Hugging Face no-object column
         sem   = sem[..., :self.num_classes]           # (B, Q, num_classes)
         sem_w = sem.softmax(dim=-1)                   # (B, Q, num_classes)
         masks = logits                                # (B, Q, Hm, Wm)
-        # 聚合: (B, num_classes, Hm, Wm)
+        # Aggregate to (B, num_classes, Hm, Wm)
         seg   = torch.einsum("bqc,bqhw->bchw", sem_w, masks)
-        # 上采样到原始分辨率
+        # Upsample to the original resolution
         seg   = F.interpolate(seg, size=(H, W), mode="bilinear", align_corners=False)
-        # 确保输出维度严格等于 num_classes
+        # Ensure the output channel count equals num_classes
         if seg.shape[1] != self.num_classes:
             seg = seg[:, :self.num_classes]
         return seg
@@ -754,37 +754,37 @@ def build_mask2former(num_classes: int = N_OUT,
                       pretrained:  bool = True,
                       backbone:    str  = "swin-tiny"):
     """
-    构建 Mask2Former。
+    Build Mask2Former.
 
-    backbone 选项：
-      "swin-tiny"   — 轻量，适合小数据集 (推荐)
-      "swin-small"  — 平衡精度与速度
-      "swin-base"   — 最高精度，显存需求大
+    Backbone options:
+      "swin-tiny"   - lightweight; recommended for small datasets
+      "swin-small"  - balances accuracy and speed
+      "swin-base"   - highest accuracy, with greater memory requirements
     """
     return Mask2FormerSeg(num_classes, in_channels, pretrained, backbone)
 
 
 
 # =================================================================
-# 模型: UPerNet + ResNet-50
+# Model: UPerNet + ResNet-50
 # =================================================================
 def build_r50_upernet(num_classes: int = N_OUT,
                       in_channels: int = config.IN_CHANNELS,
                       pretrained:  bool = True):
     """
-    UPerNet + ResNet-50 backbone。
+    UPerNet + ResNet-50 backbone.
 
-    参考：
+    References:
       Xiao et al. 2018 "Unified Perceptual Parsing for Scene Understanding" (ECCV)
-      Wang et al. 2023 (Swin-UperNet) 遥感分割标准对比基线
+      Wang et al. 2023 (Swin-UperNet), a standard remote sensing segmentation baseline.
 
-    特点：
-      · ResNet-50 全卷积，原生支持任意尺寸输入（无位置编码限制）
-      · 64×64 切片完全适配
-      · 经典 FPN 多尺度特征融合 + PPM 上下文聚合
-      · smp 库内置实现，稳定可靠
+    Features:
+      - Fully convolutional ResNet-50 supports arbitrary input sizes without positional encoding limits.
+      - Supports 64x64 tiles.
+      - Combines FPN multiscale feature fusion with PPM context aggregation.
+      - Uses the built-in smp implementation.
 
-    通过 segmentation_models_pytorch 的 UnetPlusPlus 用 ResNet50 backbone 实现。
+    Implemented with segmentation_models_pytorch UnetPlusPlus and a ResNet50 backbone.
     """
     try:
         import segmentation_models_pytorch as smp
@@ -797,51 +797,51 @@ def build_r50_upernet(num_classes: int = N_OUT,
         in_channels     = in_channels,
         classes         = num_classes,
         activation      = None,
-        decoder_attention_type = "scse",  # 加入 SE 注意力，近似 UPerNet 的上下文聚合
+        decoder_attention_type = "scse",  # Add SE attention to approximate UPerNet context aggregation
     )
 
 # =================================================================
-# 模型 7: VMamba-UNet (纯 PyTorch 实现，无需 mamba_ssm)
+# Model 7: VMamba-UNet (pure PyTorch, no mamba_ssm dependency)
 # =================================================================
 class _S6Block(nn.Module):
     """
-    简化版 S6 (Selective State Space) Block — 纯 PyTorch 实现。
+    Simplified S6 (Selective State Space) block implemented in pure PyTorch.
 
-    参考：
+    References:
       Gu & Dao 2023 "Mamba: Linear-Time Sequence Modeling with Selective State Spaces"
-      Liu et al. 2024 "VMamba: Visual State Space Model" (CVMH-UNet / Samba 均基于此)
-      Cao et al. 2024 "CVMH-UNet" Remote Sensing 2025 (遥感语义分割)
+      Liu et al. 2024, "VMamba: Visual State Space Model" (the basis for CVMH-UNet and Samba).
+      Cao et al. 2024, "CVMH-UNet", Remote Sensing 2025 (remote sensing semantic segmentation).
 
-    核心思想：
-      · SSM 用离散化递推方程建模长程依赖：h_t = A*h_{t-1} + B*x_t
-      · 输入自适应选择（selective）：B、C、delta 由输入 x 决定
-      · 等价于因果卷积（序列短时）或高效递推（序列长时）
+    Core ideas:
+      - Model long-range dependencies through the discrete SSM recurrence h_t = A*h_{t-1} + B*x_t.
+      - Input-dependent selection: B, C, and delta depend on x.
+      - Use causal convolution for short sequences or efficient recurrence for long sequences.
 
-    实现简化：
-      · 使用 1D 因果卷积近似 SSM 递推（计算等价，更适合 GPU 并行）
-      · 保留 selective 机制：delta/B/C 由线性投影生成
-      · 不依赖 CUDA kernel，纯 PyTorch 实现，兼容任意 CUDA 版本
+    Implementation simplifications:
+      - Approximate SSM recurrence with 1D causal convolution for GPU parallelism.
+      - Retain the selective mechanism: generate delta/B/C through linear projections.
+      - Use pure PyTorch without custom CUDA kernels for compatibility across CUDA versions.
     """
     def __init__(self, d_model: int, d_state: int = 16, expand: int = 2):
         super().__init__()
         self.d_inner = d_model * expand
         d_inner = self.d_inner
 
-        # 输入投影
+        # Input projection
         self.in_proj  = nn.Linear(d_model, d_inner * 2, bias=False)
-        # 深度卷积（替代 SSM 短程递推）
+        # Depthwise convolution in place of short-range SSM recurrence
         self.conv1d   = nn.Conv1d(d_inner, d_inner, kernel_size=3,
                                   padding=1, groups=d_inner, bias=True)
         self.act      = nn.SiLU()
 
-        # Selective: 生成 delta, B, C
+        # Generate selective parameters delta, B, and C
         self.x_proj   = nn.Linear(d_inner, d_state * 2 + 1, bias=False)
 
-        # A 矩阵（固定，对数参数化）
+        # Fixed A matrix with logarithmic parameterization
         A = torch.arange(1, d_state + 1, dtype=torch.float32).unsqueeze(0)
         self.log_A    = nn.Parameter(torch.log(A.expand(d_inner, -1)))
 
-        # 输出投影
+        # Output projection
         self.out_proj = nn.Linear(d_inner, d_model, bias=False)
         self.norm     = nn.LayerNorm(d_model)
 
@@ -850,26 +850,26 @@ class _S6Block(nn.Module):
         residual = x
         B, L, D  = x.shape
 
-        # 投影 + gate
+        # Projection and gating
         xz  = self.in_proj(x)                       # (B,L,2*d_inner)
         x_s, z = xz.chunk(2, dim=-1)               # each (B,L,d_inner)
 
-        # 深度卷积
+        # Depthwise convolution
         x_s = self.conv1d(x_s.transpose(1, 2)).transpose(1, 2)
         x_s = self.act(x_s)
 
-        # Selective 参数
+        # Selective parameters
         delta_BC = self.x_proj(x_s)                # (B,L,2*d_state+1)
         d_state  = (delta_BC.shape[-1] - 1) // 2
-        delta    = F.softplus(delta_BC[..., :1])   # (B,L,1) 正值
+        delta    = F.softplus(delta_BC[..., :1])   # (B,L,1), positive values
         B_sel    = delta_BC[..., 1:d_state+1]      # (B,L,d_state)
         C_sel    = delta_BC[..., d_state+1:]       # (B,L,d_state)
 
-        # 近似 SSM 输出：用加权求和代替完整递推（O(L) 近似）
+        # Approximate SSM output using a weighted sum instead of full recurrence (O(L))
         # y_t = C * h_t ≈ C * sum_{s<=t} exp(-delta*A*(t-s)) * B * x_s
-        # 简化：用局部卷积聚合（等价于小窗 SSM）
+        # Aggregate with a local convolution, approximating a small-window SSM
         A_neg = -torch.exp(self.log_A)             # (d_inner, d_state)
-        # 用 delta 缩放后归一化加权
+        # Scale by delta and normalize the weights
         weight = torch.sigmoid(delta)              # (B,L,1) as gating
         y = x_s * weight + x_s * (1 - weight)    # identity shortcut
 
@@ -881,11 +881,11 @@ class _S6Block(nn.Module):
 
 class _VSS_Block(nn.Module):
     """
-    Visual State Space Block — 2D 扫描版本。
+    Visual State Space block with 2D scanning.
 
-    将 H×W 特征图展开为序列，分4个方向扫描后聚合：
-      水平正向、水平反向、垂直正向、垂直反向
-    参考 VMamba 的 SS2D 设计，纯 PyTorch 实现。
+    Flatten the HxW feature map into sequences and aggregate four scan directions:
+      horizontal forward, horizontal backward, vertical forward, and vertical backward.
+    Follow VMamba's SS2D design using pure PyTorch.
     """
     def __init__(self, channels: int, d_state: int = 16):
         super().__init__()
@@ -895,18 +895,18 @@ class _VSS_Block(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (B, C, H, W)"""
         B, C, H, W = x.shape
-        # 展开为序列 (B, H*W, C)
+        # Flatten to a sequence (B, H*W, C)
         x_flat = x.permute(0, 2, 3, 1).reshape(B, H*W, C)
         x_norm = self.norm(x_flat)
 
-        # 4方向扫描
+        # Scan in four directions
         seqs = [
-            x_norm,                                  # 水平正向
-            x_norm.flip(1),                          # 水平反向
+            x_norm,                                  # Horizontal forward
+            x_norm.flip(1),                          # Horizontal backward
             x_norm.reshape(B, H, W, C)
-                  .permute(0, 2, 1, 3).reshape(B, H*W, C),   # 垂直正向
+                  .permute(0, 2, 1, 3).reshape(B, H*W, C),   # Vertical forward
             x_norm.reshape(B, H, W, C)
-                  .permute(0, 2, 1, 3).reshape(B, H*W, C).flip(1),  # 垂直反向
+                  .permute(0, 2, 1, 3).reshape(B, H*W, C).flip(1),  # Vertical backward
         ]
         outs = []
         for i, seq in enumerate(seqs):
@@ -919,28 +919,28 @@ class _VSS_Block(nn.Module):
                 out = out.flip(1).reshape(B, W, H, C).permute(0, 2, 1, 3).reshape(B, H*W, C)
             outs.append(out)
 
-        # 聚合
+        # Aggregate
         y = sum(outs) / len(outs)
         return y.reshape(B, H, W, C).permute(0, 3, 1, 2)  # (B,C,H,W)
 
 
 class VMambaUNet(nn.Module):
     """
-    VMamba-UNet: VSS Block 编码器 + UNet 跳连解码器。
+    VMamba-UNet: VSS block encoder and UNet decoder with skip connections.
 
-    架构：
-      输入 (B, IN_CH, 64, 64)
-      Encoder: 4级下采样，每级 VSS Block 提取全局特征
-      Decoder: 双线性上采样 + skip connection + Conv
-      分类头: 1×1 conv → num_classes
+    Architecture:
+      Input (B, IN_CH, 64, 64)
+      Encoder: four downsampling stages, each using VSS blocks to extract global features.
+      Decoder: bilinear upsampling, skip connections, and convolutions.
+      Classification head: 1x1 convolution -> num_classes.
 
-    优势：
-      · SSM 线性复杂度，原生支持任意输入尺寸（无位置编码限制）
-      · 64×64 切片完全适配，无需 resize
-      · 全方向扫描捕获卫星图像多方向空间特征
-      · 纯 PyTorch，无需 CUDA 自定义 kernel
+    Properties:
+      - Linear SSM complexity and arbitrary input sizes without positional encoding limits.
+      - Supports 64x64 tiles without resizing.
+      - Scans in all directions to capture spatial features of satellite imagery.
+      - Pure PyTorch, without custom CUDA kernels.
 
-    参考：
+    References:
       Samba (PMC 2024): Mamba encoder + UperNet decoder for remote sensing
       CVMH-UNet (Remote Sensing 2025): VMamba + multi-scale fusion
       EGCM-UNet (2024): CNN-Mamba hybrid for farmland segmentation
@@ -956,13 +956,13 @@ class VMambaUNet(nn.Module):
             "is not a valid VMamba/SSM block."
         )
 
-        # ── 初始投影 ──────────────────────────────────────────────
+        # Initial projection
         self.stem = nn.Sequential(
             nn.Conv2d(in_channels, base_ch, 3, padding=1, bias=False),
             nn.BatchNorm2d(base_ch), nn.ReLU(inplace=True),
         )
 
-        # ── 编码器 (4级，每级 VSS + 下采样) ─────────────────────
+        # Encoder: four stages of VSS blocks and downsampling
         chs = [base_ch, base_ch*2, base_ch*4, base_ch*8]   # 64,128,256,512
 
         self.enc_vss = nn.ModuleList([
@@ -978,7 +978,7 @@ class VMambaUNet(nn.Module):
         # ── Bottleneck ────────────────────────────────────────────
         self.bottleneck = _VSS_Block(chs[-1], d_state=d_state)
 
-        # ── 解码器 ────────────────────────────────────────────────
+        # Decoder
         dec_chs = chs[::-1]   # 512,256,128,64
         self.dec_up   = nn.ModuleList([
             nn.Sequential(
@@ -993,7 +993,7 @@ class VMambaUNet(nn.Module):
             ) for i in range(len(dec_chs)-1)
         ])
 
-        # ── 分类头 ────────────────────────────────────────────────
+        # Classification head
         self.cls_head = nn.Conv2d(base_ch, num_classes, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1002,13 +1002,13 @@ class VMambaUNet(nn.Module):
         # Stem
         x = self.stem(x)       # (B, 64, H, W)
 
-        # Encoder + 保存 skip connections
+        # Encode and save skip connections
         skips = []
         for i, (vss, down) in enumerate(zip(self.enc_vss[:-1], self.enc_down)):
             x = vss(x)
             skips.append(x)
             x = down(x)
-        x = self.enc_vss[-1](x)   # 最深层 VSS
+        x = self.enc_vss[-1](x)   # Deepest VSS layer
 
         # Bottleneck
         x = self.bottleneck(x)
@@ -1021,7 +1021,7 @@ class VMambaUNet(nn.Module):
                               mode="bilinear", align_corners=False)
             x = fuse_conv(torch.cat([x, skip], dim=1))
 
-        # 上采样到原始分辨率
+        # Upsample to the original resolution
         x = F.interpolate(x, size=(H, W), mode="bilinear", align_corners=False)
         return self.cls_head(x)
 
@@ -1031,15 +1031,15 @@ def build_vmamba_unet(num_classes: int = N_OUT,
                       base_ch:     int = 64,
                       d_state:     int = 16):
     """
-    构建 VMamba-UNet。
+    Build VMamba-UNet.
 
-    base_ch: 基础通道数，控制模型大小
-      64  → ~12M 参数（推荐，适合小数据集）
-      128 → ~48M 参数（更高精度，显存需求大）
+    base_ch: base channel count controlling model size.
+      64  -> approximately 12M parameters (recommended for small datasets)
+      128 -> approximately 48M parameters (higher accuracy, with greater memory requirements)
 
-    d_state: SSM 状态维度，控制长程建模能力
-      16 → 标准配置
-      32 → 更强全局建模
+    d_state: SSM state dimension controlling long-range modeling capacity.
+      16 -> standard configuration
+      32 -> greater modeling capacity
     """
     raise RuntimeError(
         "vmamba_unet has been removed from the active framework because the "

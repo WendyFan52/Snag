@@ -1,18 +1,18 @@
 """
-数据预处理脚本 — prepare_data.py
+Data preprocessing - prepare_data.py
 -----------------------------------------------------------------
-流程:
-  1. 读取 TIF + SHP (Class_Int字段)
-  2. SHP 栅格化为 Mask（像素值=类别ID，0=未标注）
-  3. 将 PlanetScope SR 存储值按固定比例转为反射率，追加遥感指数
-  4. 滑窗切片，过滤低标注率切片
-  5. 输出 images/*.tif (多通道) + masks/*.png (单通道)
+Workflow:
+  1. Read TIF imagery and SHP labels (Class_Int field).
+  2. Rasterize SHP labels to a mask (pixel values=class IDs, 0=unlabeled).
+  3. Convert stored PlanetScope SR values to reflectance using a fixed scale; append indices.
+  4. Extract sliding-window tiles and filter those with insufficient label coverage.
+  5. Save images/*.tif (multiple channels) and masks/*.png (single channel).
 
-依赖：pip install rasterio geopandas numpy Pillow tqdm
+Dependencies: pip install rasterio geopandas numpy Pillow tqdm
 
-用法：
+Usage:
   python prepare_data.py
-  python prepare_data.py --dry_run   # 只统计，不写文件
+  python prepare_data.py --dry_run   # Report counts without writing files
 -----------------------------------------------------------------
 """
 
@@ -28,7 +28,7 @@ try:
     import geopandas as gpd
     from PIL import Image
 except ImportError as e:
-    sys.exit(f"[错误] 缺少依赖: {e}\n请运行: pip install rasterio geopandas Pillow tqdm")
+    sys.exit(f"[Error] Missing dependency: {e}\nRun: pip install rasterio geopandas Pillow tqdm")
 
 import config
 from input_preprocessing import preprocessing_tags, sr_to_feature_stack
@@ -37,7 +37,7 @@ warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarni
 
 
 # -----------------------------------------------------------------
-# SHP 匹配
+# Match SHP files
 # -----------------------------------------------------------------
 def find_shp_for_tif(tif_path: str, shp_dir: str) -> Optional[str]:
     stem      = Path(tif_path).stem
@@ -50,19 +50,19 @@ def find_shp_for_tif(tif_path: str, shp_dir: str) -> Optional[str]:
 
 
 # -----------------------------------------------------------------
-# SHP 栅格化
+# SHP rasterization
 # -----------------------------------------------------------------
 def rasterize_shp(shp_path: str, ref_tif_path: str) -> np.ndarray:
     """
-    返回 (H, W) int32 mask，0=未覆盖(未标注)
+    Return an (H, W) int32 mask; 0=uncovered (unlabeled).
 
-    栅格化优先级：类别值小的图斑优先（最后绘制，覆盖之前的）。
-    Dead_trees(1) 最后绘制，覆盖 Living_trees(2) 及其他所有类别。
-    这符合"先标注所有树为活树，再在死树位置叠加死树图斑"的标注工作流。
+    Polygons with lower class IDs take priority: draw them last to overwrite earlier polygons.
+    Draw Dead_trees(1) last, overwriting Living_trees(2) and all other classes.
+    This matches the workflow of labeling all trees as living before overlaying dead-tree polygons.
 
-    CRS 处理：
-    - 用 pyproj.CRS.equals() 精确比较（避免字符串表示不同导致误判）
-    - SHP 无 CRS 定义时假设与 TIF 一致（发出警告）
+    CRS handling:
+    - Compare using pyproj.CRS.equals() to avoid mismatches from different string representations.
+    - If the SHP has no CRS, assume the TIF CRS and issue a warning.
     """
     with rasterio.open(ref_tif_path) as src:
         out_shape = (src.height, src.width)
@@ -121,25 +121,25 @@ def rasterize_shp(shp_path: str, ref_tif_path: str) -> np.ndarray:
 
 
 # -----------------------------------------------------------------
-# LCI 权重图计算
+# Compute LCI weight maps
 # -----------------------------------------------------------------
 def compute_lci_map(shp_path: str, ref_tif_path: str) -> np.ndarray:
     """
-    计算全图每个像元的 LCI_w（标签置信度指数）。
+    Compute LCI_w (Label Confidence Index) for every pixel in the image.
 
     LCI_w = LCI_raw = max(class_coverage_ratio per pixel)
 
-    方法：对每个被标注的像元，用 SOFT_LABEL_SUBGRID × SOFT_LABEL_SUBGRID
-    的子像元格网计算各类别覆盖比例，取最大值作为 LCI_raw。
-    LCI_raw 直接作为 LCI_w，不引入 separability 惩罚。
+    For each labeled pixel, use a SOFT_LABEL_SUBGRID x SOFT_LABEL_SUBGRID
+    subpixel grid to estimate class coverage fractions; take the maximum as LCI_raw.
+    Use LCI_raw directly as LCI_w, without a separability penalty.
 
-    子像元精度：
-      对于 Dead/Living 边界（sep=0.25），使用 get_local_subgrid(1,2)=20
-      更精细的格网意味着更准确的覆盖率估计。
+    Subpixel precision:
+      For Dead/Living boundaries (sep=0.25), use get_local_subgrid(1,2)=20.
+      A finer grid provides more precise coverage estimates.
 
-    未标注像元（mask=0）的 LCI 设为 0.0（训练时被 IGNORE_INDEX 跳过）。
+    Set LCI to 0.0 for unlabeled pixels (mask=0), skipped by IGNORE_INDEX during training.
 
-    返回：(H, W) float32，值域 [0, 1]
+    Return: (H, W) float32 in [0, 1].
     """
     from rasterio.transform import from_bounds as tfm_from_bounds
 
@@ -226,12 +226,12 @@ def compute_lci_map(shp_path: str, ref_tif_path: str) -> np.ndarray:
 
 
 # -----------------------------------------------------------------
-# 读取 PlanetScope SR + 追加指数
+# Read PlanetScope SR imagery and append indices
 # -----------------------------------------------------------------
 def read_and_prepare(tif_path: str) -> np.ndarray:
     """
-    读取 TIF → 固定比例转换为反射率 → 追加遥感指数
-    返回 (C_total, H, W) float32
+    Read TIF -> convert to reflectance using a fixed scale -> append spectral indices.
+    Return (C_total, H, W) float32.
     """
     with rasterio.open(tif_path) as src:
         data = src.read().astype(np.float32)   # (C, H, W)
@@ -251,10 +251,10 @@ def read_and_prepare(tif_path: str) -> np.ndarray:
 
 
 # -----------------------------------------------------------------
-# 切片保存
+# Save tiles
 # -----------------------------------------------------------------
 def save_tile_tif(data: np.ndarray, out_path: str):
-    """保存多通道切片为 GeoTIFF (无地理参考，仅数据)"""
+    """Save a multichannel tile as GeoTIFF data without georeferencing."""
     C, H, W = data.shape
     with rasterio.open(out_path, "w",
                        driver="GTiff", count=C,
@@ -273,12 +273,12 @@ def tile_and_save(img_data: np.ndarray, mask: np.ndarray,
                   lci_map:   np.ndarray = None,
                   dry_run:   bool = False) -> dict:
     """
-    lci_map: (H, W) float32 [0,1] — 与 mask 同尺寸的 LCI 权重图。
-             None 时所有有效像元权重设为 1.0。
-    切片保存到三个目录：
-      TRAIN_IMG_DIR  / {fname}.tif   — 影像切片（含遥感指数）
-      TRAIN_MASK_DIR / {fname}.png   — 标注 mask（int8）
-      TRAIN_LCI_DIR  / {fname}.npy   — LCI 权重图（float32）
+    lci_map: (H, W) float32 [0,1] - LCI weights with the same dimensions as mask.
+             If None, assign weight 1.0 to every valid pixel.
+    Save tiles to three directories:
+      TRAIN_IMG_DIR  / {fname}.tif   - image tiles including spectral indices
+      TRAIN_MASK_DIR / {fname}.png   - label masks (int8)
+      TRAIN_LCI_DIR  / {fname}.npy   - LCI weight maps (float32)
     """
     ts   = config.TILE_SIZE
     st   = config.TILE_STRIDE
@@ -329,23 +329,23 @@ def tile_and_save(img_data: np.ndarray, mask: np.ndarray,
 
 
 # -----------------------------------------------------------------
-# 主流程
+# Main workflow
 # -----------------------------------------------------------------
 def main(dry_run: bool = False):
     tif_paths = sorted(glob.glob(os.path.join(config.RAW_TIF_DIR, "*.tif")))
     if not tif_paths:
-        sys.exit(f"[错误] 未找到 TIF: {config.RAW_TIF_DIR}")
+        sys.exit(f"[Error] No TIF files found: {config.RAW_TIF_DIR}")
 
-    print(f"找到 {len(tif_paths)} 张 TIF")
+    print(f"Found {len(tif_paths)} TIF files")
     print(f"BAND_MODE={config.BAND_MODE}  "
           f"RAW={config.RAW_CHANNELS}ch → IN={config.IN_CHANNELS}ch")
-    print(f"切片大小={config.TILE_SIZE}, 步长={config.TILE_STRIDE}, "
-          f"最低标注比例={config.MIN_LABEL_RATIO:.0%}\n")
+    print(f"Tile size={config.TILE_SIZE}, stride={config.TILE_STRIDE}, "
+          f"minimum label coverage={config.MIN_LABEL_RATIO:.0%}\n")
 
     total_saved = total_skipped = 0
     failed = []
 
-    for tif_path in tqdm(tif_paths, desc="处理影像"):
+    for tif_path in tqdm(tif_paths, desc="Processing imagery"):
         sample_id = Path(tif_path).stem.split("_")[0]
         shp_path  = find_shp_for_tif(tif_path, config.RAW_SHP_DIR)
 
@@ -362,21 +362,21 @@ def main(dry_run: bool = False):
             s = tile_and_save(img_data, mask, sample_id,
                               lci_map=lci_map, dry_run=dry_run)
 
-            tqdm.write(f"  ✔ {sample_id} | 总={s['total']} "
-                       f"保留={s['saved']} 过滤={s['skipped']}")
+            tqdm.write(f"  [OK] {sample_id} | total={s['total']} "
+                       f"saved={s['saved']} skipped={s['skipped']}")
             total_saved   += s["saved"]
             total_skipped += s["skipped"]
 
         except Exception as e:
-            tqdm.write(f"  ✘ {sample_id} 失败: {e}")
+            tqdm.write(f"  [ERROR] {sample_id} failed: {e}")
             failed.append(sample_id)
             raise
 
     print(f"\n{'='*50}")
-    print(f"  {'(DRY RUN) ' if dry_run else ''}完成")
-    print(f"  保留切片: {total_saved}   过滤切片: {total_skipped}")
+    print(f"  {'(DRY RUN) ' if dry_run else ''}Complete")
+    print(f"  Saved tiles: {total_saved}   Skipped tiles: {total_skipped}")
     if failed:
-        print(f"  失败: {failed}")
+        print(f"  Failed: {failed}")
     print(f"{'='*50}")
     if total_saved <= 0:
         raise RuntimeError("No training tiles were saved. Check RAW_TIF_DIR, RAW_SHP_DIR, and MIN_LABEL_RATIO.")
@@ -398,17 +398,17 @@ def _print_class_stats(max_samples: int = 500):
             counts[c] += (m == c).sum()
 
     total_labeled = counts[1:].sum()
-    print(f"\n  类别像素分布（抽样 {len(mask_files)} 张）：")
-    print(f"  {'类别':<28} {'像素数':>12} {'占比':>8} {'建议权重':>10}")
+    print(f"\n  Class pixel distribution ({len(mask_files)} masks sampled):")
+    print(f"  {'Class':<28} {'Pixels':>12} {'Share':>8} {'Suggested weight':>10}")
     print(f"  {'-'*60}")
-    print(f"  {'[0] 未标注(IGNORE)':<28} {counts[0]:>12,}   —")
+    print(f"  {'[0] Unlabeled (IGNORE)':<28} {counts[0]:>12,}   -")
     for cls in range(1, config.NUM_CLASSES + 1):
         name  = config.CLASS_NAMES.get(cls, f"cls{cls}")
         ratio = counts[cls] / max(total_labeled, 1)
         w_sug = round(1.0 / max(ratio, 0.01), 2)
         print(f"  [{cls}] {name:<25} {counts[cls]:>12,} "
               f"{ratio:>7.2%} {w_sug:>10.2f}")
-    print("\n  ↑ 将建议权重填入 config.py 的 CLASS_WEIGHTS（适当平滑后使用）")
+    print("\n  Apply suitable smoothing, then copy the suggested weights to config.py's CLASS_WEIGHTS.")
 
 
 if __name__ == "__main__":

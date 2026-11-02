@@ -1,11 +1,11 @@
 """
-改进的损失函数 — models_improved.py
+Loss functions - models_improved.py
 -----------------------------------------------------------------
 ImprovedLoss = FocalLoss(0.3) + DiceLoss(0.3) + LovászLoss(0.4)
 
-Lovász Loss 直接优化 IoU，在小样本类别上比纯 CE/Focal 高 3-5% mIoU。
-内置实现，无需额外安装。
-文献：Berman et al. 2018 "The Lovász-Softmax Loss"
+Lovasz loss directly optimizes IoU; the reported mIoU gain over CE/Focal is 3-5% for classes with few samples.
+The implementation is included and requires no additional installation.
+Reference: Berman et al. 2018, "The Lovasz-Softmax Loss".
 -----------------------------------------------------------------
 """
 
@@ -22,7 +22,7 @@ from models import FocalLoss, DiceLoss
 
 
 # =================================================================
-# Lovász Loss（内置实现）
+# Lovasz loss implementation
 # =================================================================
 def _lovasz_grad(gt_sorted: torch.Tensor) -> torch.Tensor:
     p     = len(gt_sorted)
@@ -38,13 +38,13 @@ def _lovasz_grad(gt_sorted: torch.Tensor) -> torch.Tensor:
 def _lovasz_softmax_flat(probs: torch.Tensor,
                           labels: torch.Tensor) -> torch.Tensor:
     """
-    probs:  (P, C) — P 有效像素，C 类别数
-    labels: (P,)   — 真实类别
+    probs:  (P, C) - P valid pixels and C classes
+    labels: (P,)   - ground-truth classes
     """
     C      = probs.size(1)
     losses = []
 
-    for c in range(1, C):   # 跳过 ignore slot 0
+    for c in range(1, C):   # Skip ignore slot 0
         fg       = (labels == c).float()
         if fg.sum() == 0:
             continue
@@ -59,7 +59,7 @@ def _lovasz_softmax_flat(probs: torch.Tensor,
 
 
 class LovaszLoss(nn.Module):
-    """Lovász Softmax Loss — 直接优化多类 IoU"""
+    """Lovasz-Softmax loss for directly optimizing multiclass IoU."""
     def __init__(self, ignore_index: int = config.IGNORE_INDEX):
         super().__init__()
         self.ignore_index = ignore_index
@@ -82,7 +82,7 @@ class LovaszLoss(nn.Module):
 
 
 # =================================================================
-# 动态类别权重计算
+# Dynamic class weights
 # =================================================================
 def compute_dynamic_weights_from_paths(mask_paths: Iterable[str],
                                        num_classes: int,
@@ -121,14 +121,14 @@ def compute_dynamic_weights(mask_dir:     str,
                              max_samples:  int   = 500,
                              smoothing:    float = 0.15) -> list:
     """
-    基于实际像素频率的反比权重：w_c = (1-smooth)/freq_c + smooth
-    在 train() 开始前调用，结果替换 config.CLASS_WEIGHTS。
+    Inverse-frequency weights: w_c = (1-smooth)/freq_c + smooth.
+    Call before train() and replace config.CLASS_WEIGHTS with the result.
 
-    返回长度 num_classes 的列表（对应 class 1..num_classes）。
+    Return a list of length num_classes, corresponding to classes 1..num_classes.
     """
     files  = sorted(glob.glob(os.path.join(mask_dir, "*.png")))[:max_samples]
     if not files:
-        print("[警告] 未找到 mask 文件，使用默认权重")
+        print("[Warning] No mask files found; using default weights")
         return config.CLASS_WEIGHTS
 
     counts = np.zeros(num_classes + 1, dtype=np.int64)
@@ -146,16 +146,16 @@ def compute_dynamic_weights(mask_dir:     str,
     weights = (1.0 - smoothing) / np.maximum(freq, 1e-8) + smoothing
     weights = (weights / weights.mean()).tolist()
 
-    print(f"[动态权重] 基于 {len(files)} 张 mask 计算：")
+    print(f"[Class weights] Computed from {len(files)} masks:")
     for i, (w, f) in enumerate(zip(weights, freq)):
         cls  = i + 1
         name = config.CLASS_NAMES.get(cls, f"cls{cls}")
-        print(f"  [{cls}] {name:<22} 频率={f:.2%}  权重={w:.3f}")
+        print(f"  [{cls}] {name:<22} frequency={f:.2%}  weight={w:.3f}")
     return weights
 
 
 # =================================================================
-# 改进的组合损失
+# Combined loss
 # =================================================================
 class ImprovedLoss(nn.Module):
     """

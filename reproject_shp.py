@@ -1,11 +1,11 @@
 """
-重投影 SHP 文件 — reproject_shp.py
+Reproject SHP files - reproject_shp.py
 =================================================================
-将 CRS 不匹配的 SHP 文件重投影到与对应 TIF 相同的坐标系。
+Reproject SHP files with mismatched CRSs to the CRS of their corresponding TIF.
 
-用法：
-  python reproject_shp.py             # 正式执行（原文件备份到 _backup/）
-  python reproject_shp.py --dry_run   # 只打印，不写文件
+Usage:
+  python reproject_shp.py             # Apply changes; back up originals to _backup/
+  python reproject_shp.py --dry_run   # Print planned changes without writing files
 =================================================================
 """
 
@@ -28,8 +28,8 @@ except ImportError as e:
 import config
 
 # =================================================================
-# 配置：需要重投影的样本 ID → 目标 EPSG
-# 从 check_data.py 报告的 CRS MISMATCH 中读取
+# Configuration: sample IDs requiring reprojection -> target EPSG codes
+# Use the CRS MISMATCH entries reported by check_data.py
 # =================================================================
 TARGETS = {
     "1009": "EPSG:32617",
@@ -43,7 +43,7 @@ TARGETS = {
     "1357": "EPSG:32628",
 }
 
-# 如果不想手写，设为 True 则自动从 TIF 读取目标 CRS
+# Set True to read target CRSs from TIFs instead of specifying them manually
 AUTO_DETECT = True    # Auto-detect all mismatches by comparing each SHP to its TIF
 
 
@@ -70,12 +70,12 @@ def get_tif_crs(tif_path: str) -> str:
 
 def reproject_one(shp_path: str, target_crs: str,
                   backup_dir: str, dry_run: bool) -> bool:
-    """重投影一个 SHP 文件，原文件备份到 backup_dir。"""
+    """Reproject one SHP file and back up its original files to backup_dir."""
     try:
         gdf = gpd.read_file(shp_path)
         src_crs = str(gdf.crs) if gdf.crs else "None"
 
-        # 检查是否真的需要重投影
+        # Check whether reprojection is necessary
         if gdf.crs is not None:
             try:
                 if ProjCRS.from_user_input(gdf.crs).equals(
@@ -92,7 +92,7 @@ def reproject_one(shp_path: str, target_crs: str,
             print(f"    [dry_run] would reproject and overwrite")
             return True
 
-        # 备份：复制所有相关文件（.shp .dbf .prj .shx .cpg）
+        # Back up all companion files (.shp .dbf .prj .shx .cpg)
         stem = shp_path[:-4]
         os.makedirs(backup_dir, exist_ok=True)
         for ext in (".shp", ".dbf", ".prj", ".shx", ".cpg"):
@@ -102,7 +102,7 @@ def reproject_one(shp_path: str, target_crs: str,
                                         os.path.basename(src_file))
                 shutil.copy2(src_file, dst_file)
 
-        # 重投影并覆盖
+        # Reproject and overwrite
         gdf_repr = gdf.to_crs(target_crs)
         gdf_repr.to_file(shp_path, driver="ESRI Shapefile")
         print(f"    OK — saved to {shp_path}")
@@ -124,7 +124,7 @@ def main(dry_run: bool = False):
     print(f"Mode    : {'DRY RUN' if dry_run else 'LIVE (will overwrite)'}\n")
 
     if AUTO_DETECT:
-        # 自动扫描所有 SHP，找 CRS 不匹配的
+        # Scan all SHP files for CRS mismatches
         print("Auto-detecting CRS mismatches...")
         all_shp = glob.glob(os.path.join(shp_dir, "*.shp"))
         all_shp = [s for s in all_shp if "_backup" not in s]

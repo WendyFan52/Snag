@@ -1,10 +1,10 @@
 """
-真值可视化对比 — visualize_gt.py
+Ground-truth comparison visualization - visualize_gt.py
 -----------------------------------------------------------------
-生成四联对比图：
-  原图RGB | 模型预测 | SHP真值叠加 | Class1(死树)概率热力图
+Generate a four-panel comparison:
+  Original RGB | Model prediction | SHP ground-truth overlay | Class 1 (dead tree) probability heatmap
 
-用法：
+Usage:
   python visualize_gt.py \
       --image /path/to/image.tif \
       --shp   /path/to/labels.shp \
@@ -34,10 +34,10 @@ from random_forest_utils import (
 
 
 # -----------------------------------------------------------------
-# SHP 栅格化
+# SHP rasterization
 # -----------------------------------------------------------------
 def rasterize_shp(shp_path: str, ref_tif_path: str) -> np.ndarray:
-    """将 SHP 栅格化为与 TIF 相同尺寸的 mask (H,W)"""
+    """Rasterize SHP labels to a mask (H, W) matching the TIF dimensions."""
     with rasterio.open(ref_tif_path) as src:
         out_shape = (src.height, src.width)
         transform = src.transform
@@ -47,7 +47,7 @@ def rasterize_shp(shp_path: str, ref_tif_path: str) -> np.ndarray:
     field = config.SHP_CLASS_FIELD
 
     if field not in gdf.columns:
-        raise KeyError(f"SHP 缺少字段 '{field}'")
+        raise KeyError(f"SHP is missing field '{field}'")
 
     if gdf.crs and crs and gdf.crs != crs:
         gdf = gdf.to_crs(crs)
@@ -67,16 +67,16 @@ def rasterize_shp(shp_path: str, ref_tif_path: str) -> np.ndarray:
 
 
 # -----------------------------------------------------------------
-# 真值叠加绘制
+# Ground-truth overlay
 # -----------------------------------------------------------------
 def draw_gt_overlay(image_rgb: np.ndarray,
                     gt_mask:   np.ndarray,
                     alpha:     float = 0.45) -> np.ndarray:
     """
-    在 RGB 影像上叠加 SHP 真值：
-      · 半透明填充色（各类按调色板）
-      · 白色轮廓线
-      · 左上角类别图例
+    Overlay SHP ground truth on RGB imagery:
+      - Semitransparent fills using the class palette
+      - White outlines
+      - Class legend in the upper-left corner
     """
     canvas      = image_rgb.copy().astype(np.float32)
     color_layer = np.zeros_like(canvas)
@@ -89,7 +89,7 @@ def draw_gt_overlay(image_rgb: np.ndarray,
             continue
         color_layer[mask] = rgb
 
-        # 白色轮廓
+        # White outlines
         mask_u8  = mask.astype(np.uint8) * 255
         contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL,
                                         cv2.CHAIN_APPROX_SIMPLE)
@@ -121,13 +121,13 @@ def _draw_legend(img: np.ndarray, fscale: float = 0.40):
 
 
 # -----------------------------------------------------------------
-# 主函数
+# Main function
 # -----------------------------------------------------------------
 def make_comparison(image_path: str, shp_path: str,
                     model_name: str,
                     device) -> str:
-    """生成四联对比图，返回保存路径"""
-    # 1. 读图 + 推理
+    """Generate a four-panel comparison and return the saved file path."""
+    # 1. Read imagery and run inference
     image_rgb  = read_for_display(image_path)
     image_norm = read_full_tif_features(image_path)
 
@@ -141,18 +141,18 @@ def make_comparison(image_path: str, shp_path: str,
         prob_map = sliding_window_inference(model, image_norm, device,
                                             temperature=T)
 
-    # 2. NoData 掩膜
+    # 2. NoData mask
     valid_mask        = compute_nodata_mask(image_norm)
     masked_prob, pred = apply_nodata_mask(prob_map, valid_mask)
 
     pred_color  = pred_to_color(pred)
     class1_conf = confidence_to_image(masked_prob[1])
 
-    # 3. SHP 真值叠加
+    # 3. SHP ground-truth overlay
     gt_mask    = rasterize_shp(shp_path, image_path)
     gt_overlay = draw_gt_overlay(image_rgb, gt_mask)
 
-    # 4. 四联图拼接（加标签行）
+    # 4. Assemble four panels with a label row
     H = image_rgb.shape[0]
     W = image_rgb.shape[1]
     sep  = np.full((H, 4, 3), 180, dtype=np.uint8)
@@ -176,7 +176,7 @@ def make_comparison(image_path: str, shp_path: str,
     out    = os.path.join(config.OUTPUT_DIR,
                           f"{stem}-{model_name}-gt-comparison.png")
     Image.fromarray(final).save(out)
-    print(f"  ✔ 四联对比图 → {out}")
+    print(f"  [OK] Four-panel comparison -> {out}")
     return out
 
 

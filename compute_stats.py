@@ -1,13 +1,13 @@
 """
-计算训练集切片的逐波段均值和标准差 — compute_stats.py
+Compute per-band training tile means and standard deviations - compute_stats.py
 -----------------------------------------------------------------
-在 prepare_data.py 生成切片后运行一次，把输出结果粘贴到
-config.py 的 _BAND_PROFILES 对应 img_mean / img_std 中。
+Run once after prepare_data.py generates the tiles, then copy the results into
+the corresponding img_mean / img_std entries in config.py's _BAND_PROFILES.
 
-注意：切片已包含遥感指数（共 IN_CHANNELS 个通道），
-      统计的是所有通道（包括指数）的均值/标准差。
+Tiles already include spectral indices (IN_CHANNELS channels in total).
+      Statistics cover all channels, including the indices.
 
-用法：
+Usage:
   python compute_stats.py
   python compute_stats.py --max_samples 2000
 -----------------------------------------------------------------
@@ -25,26 +25,26 @@ def compute_stats(img_dir:     str,
                   in_channels: int,
                   max_samples: int = 1000) -> tuple:
     """
-    Welford 在线算法：无需加载全部数据，内存友好。
-    返回 (mean, std) — 各 in_channels 个 float32
+    Welford's online algorithm avoids loading all data into memory.
+    Return (mean, std), each containing in_channels float32 values.
     """
     files = sorted(glob.glob(os.path.join(img_dir, "*.tif")))
     if not files:
-        raise RuntimeError(f"未找到 .tif 文件: {img_dir}")
+        raise RuntimeError(f"No .tif files found: {img_dir}")
 
     if len(files) > max_samples:
         rng   = np.random.default_rng(42)
         files = rng.choice(files, max_samples, replace=False).tolist()
 
-    print(f"统计 {len(files)} 张切片 (共 "
-          f"{len(glob.glob(os.path.join(img_dir,'*.tif')))} 张)")
-    print(f"通道数: {in_channels}\n")
+    print(f"Computing statistics for {len(files)} tiles (out of "
+          f"{len(glob.glob(os.path.join(img_dir,'*.tif')))} total)")
+    print(f"Channels: {in_channels}\n")
 
     count = 0
     mean  = np.zeros(in_channels, dtype=np.float64)
     M2    = np.zeros(in_channels, dtype=np.float64)
 
-    for fpath in tqdm(files, desc="计算统计值"):
+    for fpath in tqdm(files, desc="Computing statistics"):
         with rasterio.open(fpath) as src:
             data = src.read().astype(np.float64)   # (C, H, W)
             tags = src.tags()
@@ -104,7 +104,7 @@ if __name__ == "__main__":
     print(f"  BAND_MODE={config.BAND_MODE}  "
           f"RAW={config.RAW_CHANNELS}ch  IN_CHANNELS={config.IN_CHANNELS}ch")
     print("="*65)
-    print("\n  将以下两行粘贴到 config.py 的对应配置块：\n")
+    print("\n  Copy the following two lines into the corresponding config.py block:\n")
     print(f'        "img_mean": {_fmt(mean)},')
     print(f'        "img_std" : {_fmt(std)},')
     print(f"\n  stats_json: {out_json}")
@@ -118,7 +118,7 @@ if __name__ == "__main__":
                     "Red", "RedEdge", "NIR",
                     "NDVI", "EVI", "NDWI", "RI", "NGRDI", "NDRE", "ChlRE"]
 
-    print(f"\n  {'通道':<20} {'均值':>10} {'标准差':>10}")
+    print(f"\n  {'Channel':<20} {'Mean':>10} {'Std. dev.':>10}")
     print(f"  {'-'*42}")
     for i, (m, s) in enumerate(zip(mean, std)):
         name = ch_names[i] if i < len(ch_names) else f"ch{i}"

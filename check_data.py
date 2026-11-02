@@ -1,22 +1,22 @@
 """
-数据质量检查脚本 — check_data.py
+Data quality checks - check_data.py
 =================================================================
-全部阈值在 config.py 中配置，本脚本零硬编码。
+All thresholds are configured in config.py rather than hardcoded here.
 
-六项检查：
-  1. 样本完整性  — TIF/SHP 配对、波段数、CRS 一致性（pyproj 精确比较）
-  2. 像元值异常  — NoData、NaN/Inf、动态范围
-  3. 标注质量    — 类别分布、覆盖率、极小图斑面积贡献分析
-  4. SHP 冲突    — 不同类别图斑重叠
-  5. 混合像元    — 边界像元比例 + 标签置信度指数(LCI)
-     LCI 量化每个像元的标签可信程度，用于软标签加权 Loss
+Six checks:
+  1. Sample integrity - TIF/SHP pairs, band counts, and CRS consistency (using pyproj).
+  2. Pixel anomalies - NoData, NaN/Inf, and dynamic range.
+  3. Label quality - class distribution, coverage, and area contributions of tiny polygons.
+  4. SHP conflicts - overlapping polygons with different classes.
+  5. Mixed pixels - boundary pixel ratio and Label Confidence Index (LCI).
+     LCI quantifies pixel label reliability for weighting the soft-label loss.
 
-极小图斑处理策略：
-  不删除，而是通过子像元面积加权自然融入软标签。
-  面积越小，对该像元软标签的贡献越小，但不为零。
-  这比删除更准确：一株 1m 小树冠仍然是真实死树。
+Handling tiny polygons:
+  Retain them in soft labels through subpixel area weighting.
+  Smaller areas contribute less to a pixel's soft label, but their contribution is nonzero.
+  This preserves real dead trees, including those with crowns only 1 m across.
 
-用法：
+Usage:
   python check_data.py
   python check_data.py --sample 10
   python check_data.py --fix
